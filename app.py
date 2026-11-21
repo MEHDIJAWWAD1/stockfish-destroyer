@@ -75,7 +75,8 @@ POWER_DESCRIPTIONS = {
     "swap": "The Queen can swap places with a White ally.",
     "hit_and_run": "Capturing grants White another move.",
     "archer": "Shoots an aligned enemy exactly two squares away.",
-    "bomber": "Goblin pawns explode when captured; Steampunk pawns self-destruct after moving.",
+    "bomber": "Goblin pawns explode when captured.",
+    "steampunk_bomber": "Steampunk pawns self-destruct after moving.",
     "armored": "Immune to captures by enemy pawns.",
     "juggernaut": "Rooks can crush enemy blockers and destroy adjacent enemies.",
     "legion": "Adjacent White pawns strengthen one another.",
@@ -188,6 +189,9 @@ for army_id, army in ARMIES.items():
             "lands on an empty square or captures a non-king enemy."
         )
         ability = army[slot]
+        if ability == "bomber" and "Steampunk Automata" in army["name"]:
+            ability = "steampunk_bomber"
+            army[slot] = ability
         effect_key = _power_effect_key(ability)
         if effect_key in used_power_effects:
             ability = f"custom_move_{army_id}_{slot}"
@@ -264,6 +268,7 @@ class AsymmetricBoard:
             self.board.ep_square if self.board.has_legal_en_passant() else None,
             tuple(sorted(self.plague_timers.items())),
             tuple(sorted(self.stun_timers.items())),
+            tuple((piece.piece_type, piece.color) for piece in self.captured_white),
         )
 
     def game_over_reason(self):
@@ -316,9 +321,19 @@ class AsymmetricBoard:
                 return True
         return False
 
+    def _capture_square(self, move):
+        if self.board.turn == chess.BLACK and self.board.is_en_passant(move):
+            return move.to_square + 8
+        if self.board.turn == chess.WHITE and self.board.is_en_passant(move):
+            return move.to_square - 8
+        return move.to_square
+
+    def _captured_piece(self, move):
+        return self.board.piece_at(self._capture_square(move))
+
     def _black_capture_is_blocked(self, move):
         attacker = self.board.piece_at(move.from_square)
-        defender = self.board.piece_at(move.to_square)
+        defender = self._captured_piece(move)
         if not attacker or attacker.color != chess.BLACK or not defender or defender.color != chess.WHITE:
             return False
 
@@ -330,7 +345,7 @@ class AsymmetricBoard:
         if ability == "phalanx" and defender.piece_type == chess.PAWN:
             if chess.square_rank(move.from_square) > chess.square_rank(move.to_square):
                 return True
-        return self._is_protected(move.to_square)
+        return self._is_protected(self._capture_square(move))
 
     def _line_is_clear(self, start, end):
         start_file, start_rank = chess.square_file(start), chess.square_rank(start)
@@ -459,7 +474,15 @@ class AsymmetricBoard:
                             continue
                         if crushed:
                             moves.append(("CRUSH", sq, target_sq))
-        return moves
+        return [move for move in moves if self._white_move_preserves_king(move)]
+
+    def _white_move_preserves_king(self, move):
+        simulated = self.copy()
+        simulated.push_custom_move(move)
+        king_square = simulated.board.king(chess.WHITE)
+        return king_square is not None and not simulated.board.is_attacked_by(
+            chess.BLACK, king_square
+        )
 
     def push_custom_move(self, move, log_events=False):
         if isinstance(move, tuple) and move[0] == "RANGED_KILL":
@@ -511,7 +534,7 @@ class AsymmetricBoard:
             move = chess.Move(attacker_sq, target_sq)
 
         attacker = self.board.piece_at(move.from_square)
-        defender = self.board.piece_at(move.to_square)
+        defender = self._captured_piece(move)
         if defender and defender.piece_type == chess.KING:
             return
         is_white = (self.board.turn == chess.WHITE)
@@ -636,7 +659,7 @@ class AsymmetricBoard:
                         break
                     target_file += direction
 
-        if ability == "bomber" and "Steampunk Automata" in self.army["name"]:
+        if ability == "steampunk_bomber":
             for square in [dest] + self._get_neighbors(dest):
                 piece = self.board.piece_at(square)
                 if piece and square == dest and piece.color == chess.WHITE and piece.piece_type == chess.PAWN:
@@ -711,17 +734,18 @@ class AsymmetricBoard:
                 self.event_log.append("⏳ Chronomancer rewound nearby threats for one turn!")
 
         if ability == "chaos":
-            effect = random.choice(("blast", "spawn", "shift"))
+            rng = random.Random(hash((self._position_key(), start, dest)))
+            effect = rng.choice(("blast", "spawn", "shift"))
             enemies = [square for square in self._get_neighbors(dest)
                        if (piece := self.board.piece_at(square)) and piece.color == chess.BLACK and piece.piece_type != chess.KING]
             empty = [square for square in self._get_neighbors(dest) if not self.board.piece_at(square)]
             if effect == "blast" and enemies:
-                target = random.choice(enemies)
+                target = rng.choice(enemies)
                 self.board.remove_piece_at(target)
             elif effect == "spawn" and empty:
-                self.board.set_piece_at(random.choice(empty), chess.Piece(chess.PAWN, chess.WHITE))
+                self.board.set_piece_at(rng.choice(empty), chess.Piece(chess.PAWN, chess.WHITE))
             elif effect == "shift" and empty:
-                target = random.choice(empty)
+                target = rng.choice(empty)
                 moved = self.board.remove_piece_at(dest)
                 if moved:
                     self.board.set_piece_at(target, moved)
@@ -861,7 +885,7 @@ def get_best_custom_move(custom_board, depth=2, for_white=True):
     for move in moves:
         sim = custom_board.copy()
         sim.push_custom_move(move)
-        ev = minimax(sim, depth - 1, alpha, beta, not for_white)
+        ev = minimax(sim, depth - 1, alpha, beta, sim.board.turn == chess.WHITE)
         if for_white and ev > best_eval:
             best_eval = ev
             best_move = move
@@ -883,7 +907,7 @@ def minimax(custom_board, depth, alpha, beta, maximizing):
         for move in moves:
             sim = custom_board.copy()
             sim.push_custom_move(move)
-            ev = minimax(sim, depth - 1, alpha, beta, False)
+            ev = minimax(sim, depth - 1, alpha, beta, sim.board.turn == chess.WHITE)
             max_eval = max(max_eval, ev)
             alpha = max(alpha, ev)
             if beta <= alpha:
@@ -894,7 +918,7 @@ def minimax(custom_board, depth, alpha, beta, maximizing):
         for move in moves:
             sim = custom_board.copy()
             sim.push_custom_move(move)
-            ev = minimax(sim, depth - 1, alpha, beta, True)
+            ev = minimax(sim, depth - 1, alpha, beta, sim.board.turn == chess.WHITE)
             min_eval = min(min_eval, ev)
             beta = min(beta, ev)
             if beta <= alpha:
@@ -1091,11 +1115,16 @@ with st.sidebar:
             st.markdown(power_line)
 
     st.header("3. Deploy Units (1, 2, 3+)")
-    p_count = st.slider("Pawns", 0, 8, 8)
-    n_count = st.slider("Knights", 0, 4, 1)
-    b_count = st.slider("Bishops", 0, 4, 0)
-    r_count = st.slider("Rooks", 0, 4, 0)
-    q_count = st.slider("Queens", 0, 3, 0)
+    pawn_power_name = UNIQUE_POWER_NAMES[f"{army_id}_p"]
+    knight_power_name = UNIQUE_POWER_NAMES[f"{army_id}_n"]
+    bishop_power_name = UNIQUE_POWER_NAMES[f"{army_id}_b"]
+    rook_power_name = UNIQUE_POWER_NAMES[f"{army_id}_r"]
+    queen_power_name = UNIQUE_POWER_NAMES[f"{army_id}_q"]
+    p_count = st.slider(f"Pawns ({pawn_power_name})", 0, 8, 8)
+    n_count = st.slider(f"Knights ({knight_power_name})", 0, 4, 1)
+    b_count = st.slider(f"Bishops ({bishop_power_name})", 0, 4, 0)
+    r_count = st.slider(f"Rooks ({rook_power_name})", 0, 4, 0)
+    q_count = st.slider(f"Queens ({queen_power_name})", 0, 3, 0)
 
     roster = {
         chess.PAWN: p_count,
