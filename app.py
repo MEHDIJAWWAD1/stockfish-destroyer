@@ -122,16 +122,21 @@ move_vectors = [
 if len(move_vectors) < len(ARMIES) * len(POWER_SLOT_ORDER):
     raise ValueError("Not enough unique move vectors for every army piece.")
 
+UNIQUE_POWER_NAMES = {}
+
 for army_id, army in ARMIES.items():
-    army["desc"] = "Every piece has its own globally unique special move."
+    army["desc"] = "Every piece has its own globally unique named custom move."
     for slot in POWER_SLOT_ORDER:
         power_id = f"unique_{army_id}_{slot}"
         vector = move_vectors[len(UNIQUE_POWER_VECTORS)]
         UNIQUE_POWER_VECTORS[power_id] = vector
+        file_name = f"East{vector[0]}" if vector[0] > 0 else f"West{abs(vector[0])}" if vector[0] < 0 else "NoFile"
+        rank_name = f"North{vector[1]}" if vector[1] > 0 else f"South{abs(vector[1])}" if vector[1] < 0 else "NoRank"
+        UNIQUE_POWER_NAMES[power_id] = f"{file_name}{rank_name}"
         army[slot] = power_id
         POWER_DESCRIPTIONS[power_id] = (
-            f"May jump by Δfile {vector[0]:+d}, Δrank {vector[1]:+d}, "
-            "over intervening pieces; captures non-king enemies."
+            f"Vaults by Δfile {vector[0]:+d}, Δrank {vector[1]:+d}, "
+            "jumping over intervening pieces and capturing non-king enemies."
         )
 
 class AsymmetricBoard:
@@ -502,7 +507,9 @@ class AsymmetricBoard:
             if log_events and used_unique_move:
                 df, dr = UNIQUE_POWER_VECTORS[ability]
                 self.event_log.append(
-                    f"✨ {chess.piece_name(attacker.piece_type).title()} used its unique move "
+                    f"✨ {chess.piece_name(attacker.piece_type).title()} "
+                    f"[{UNIQUE_POWER_NAMES[ability]}] "
+                    f"used its custom move "
                     f"({df:+d} files, {dr:+d} ranks)!"
                 )
             self._resolve_white_ability(ability, move.from_square, dest, defender, log_events)
@@ -884,7 +891,9 @@ def custom_piece_svg(piece, ability, square, cell_size):
     piece_fill = "#fff1ce" if white else "#29334b"
     ink = "#2d384e" if white else "#d7e5ff"
     accent = _piece_accent(ability)
-    ability_label = "AI" if not white else ability.replace("unique_", "").replace("_", "").upper()
+    ability_label = "AI" if not white else (
+        "VLT" if ability in UNIQUE_POWER_VECTORS else ability.replace("_", "").upper()
+    )
     opacity = "0.38" if ability == "stealth" else "1"
     file = chess.square_file(square)
     rank = chess.square_rank(square)
@@ -893,7 +902,8 @@ def custom_piece_svg(piece, ability, square, cell_size):
     title = html.escape(f"{'White' if white else 'Black'} {chess.piece_name(piece.piece_type)} — {ability}", quote=True)
     if ability in POWER_DESCRIPTIONS:
         title = html.escape(
-            f"{'White' if white else 'Black'} {chess.piece_name(piece.piece_type)} — "
+            f"{'White' if white else 'Black'} {chess.piece_name(piece.piece_type)} "
+            f"[{UNIQUE_POWER_NAMES[ability]}] — "
             f"{POWER_DESCRIPTIONS[ability]}",
             quote=True,
         )
@@ -963,7 +973,7 @@ def render_custom_board(board, army, highlights=None, arrows=None, size=480):
 
 st.title("⚔️ Asymmetric Chess Army vs. Stockfish")
 st.markdown(
-    "Choose from **30 custom armies**. Every piece has a globally unique special move. "
+    "Choose from **30 custom armies**. Every piece has a globally unique named custom move. "
     "Kings cannot be captured; games end only by checkmate, stalemate, or threefold repetition."
 )
 
@@ -982,14 +992,16 @@ with st.sidebar:
     army_id = army_options[selected_name]
     selected_army = ARMIES[army_id]
     st.info(f"**Abilities:** {selected_army['desc']}")
-    st.caption("Each piece has a different special move, unique across all 30 armies.")
+    st.caption("Each piece has a distinct, named move; the bracketed name identifies its movement.")
     with st.expander("How these powers work"):
         for label, slot in (
             ("Pawn", "p"), ("Knight", "n"), ("Bishop", "b"),
             ("Rook", "r"), ("Queen", "q"), ("King", "k")
         ):
             ability = selected_army[slot]
-            st.markdown(f"**{label} — Unique move:** {POWER_DESCRIPTIONS[ability]}")
+            st.markdown(
+                f"**{label} [{UNIQUE_POWER_NAMES[ability]}]:** {POWER_DESCRIPTIONS[ability]}"
+            )
 
     st.header("3. Deploy Units (1, 2, 3+)")
     p_count = st.slider("Pawns", 0, 8, 8)
