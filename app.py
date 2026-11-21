@@ -110,6 +110,30 @@ for army_id, army in ARMIES.items():
         if army.get(slot) not in POWER_DESCRIPTIONS:
             raise ValueError(f"Army {army_id} has no implemented power for slot {slot!r}.")
 
+POWER_SLOT_ORDER = ("p", "n", "b", "r", "q", "k")
+UNIQUE_POWER_VECTORS = {}
+move_vectors = [
+    (df, dr)
+    for distance in range(1, 8)
+    for df in range(-distance, distance + 1)
+    for dr in range(-distance, distance + 1)
+    if max(abs(df), abs(dr)) == distance
+]
+if len(move_vectors) < len(ARMIES) * len(POWER_SLOT_ORDER):
+    raise ValueError("Not enough unique move vectors for every army piece.")
+
+for army_id, army in ARMIES.items():
+    army["desc"] = "Every piece has its own globally unique special move."
+    for slot in POWER_SLOT_ORDER:
+        power_id = f"unique_{army_id}_{slot}"
+        vector = move_vectors[len(UNIQUE_POWER_VECTORS)]
+        UNIQUE_POWER_VECTORS[power_id] = vector
+        army[slot] = power_id
+        POWER_DESCRIPTIONS[power_id] = (
+            f"May jump by Δfile {vector[0]:+d}, Δrank {vector[1]:+d}, "
+            "over intervening pieces; captures non-king enemies."
+        )
+
 class AsymmetricBoard:
     def __init__(self, army_config, roster_counts=None):
         self.board = chess.Board()
@@ -119,6 +143,7 @@ class AsymmetricBoard:
         self.captured_white = []
         self.event_log = []
         self.position_history = []
+        self.position_counts = {}
         if roster_counts:
             self._apply_custom_roster(roster_counts)
         self._record_position()
@@ -156,13 +181,44 @@ class AsymmetricBoard:
                 self.board.set_piece_at(square, chess.Piece(piece_type, chess.WHITE))
 
     def _record_position(self):
+        position_key = self._position_key()
+        self.position_counts[position_key] = self.position_counts.get(position_key, 0) + 1
         self.position_history.append({
             "board": self.board.copy(stack=False),
             "plague_timers": self.plague_timers.copy(),
             "stun_timers": self.stun_timers.copy(),
             "captured_white": self.captured_white.copy(),
             "event_log": self.event_log.copy(),
+            "position_key": position_key,
         })
+
+    def _position_key(self):
+        return (
+            self.board.board_fen(),
+            self.board.turn,
+            self.board.castling_rights,
+            self.board.ep_square if self.board.has_legal_en_passant() else None,
+            tuple(sorted(self.plague_timers.items())),
+            tuple(sorted(self.stun_timers.items())),
+        )
+
+    def game_over_reason(self):
+        if self.board.king(self.board.turn) is None:
+            return "checkmate"
+        if not self.get_custom_legal_moves():
+            return "checkmate" if self.board.is_check() else "stalemate"
+        if self.position_counts.get(self._position_key(), 0) >= 3:
+            return "repetition"
+        return None
+
+    def is_game_over(self):
+        return self.game_over_reason() is not None
+
+    def result(self):
+        reason = self.game_over_reason()
+        if reason == "checkmate":
+            return "0-1" if self.board.turn == chess.WHITE else "1-0"
+        return "1/2-1/2" if reason else "*"
 
     def copy(self):
         new_b = AsymmetricBoard(self.army)
@@ -172,6 +228,7 @@ class AsymmetricBoard:
         new_b.captured_white = self.captured_white.copy()
         new_b.event_log = self.event_log.copy()
         new_b.position_history = []
+        new_b.position_counts = self.position_counts.copy()
         return new_b
 
     def get_ability(self, piece_type):
@@ -233,6 +290,32 @@ class AsymmetricBoard:
             if piece.color != chess.WHITE:
                 continue
             ability = self.get_ability(piece.piece_type)
+
+            if ability in UNIQUE_POWER_VECTORS:
+                df, dr = UNIQUE_POWER_VECTORS[ability]
+                target_file = chess.square_file(sq) + df
+                target_rank = chess.square_rank(sq) + dr
+                if 0 <= target_file <= 7 and 0 <= target_rank <= 7:
+                    target_sq = chess.square(target_file, target_rank)
+                    target_piece = self.board.piece_at(target_sq)
+                    if not target_piece or (
+                        target_piece.color == chess.BLACK
+                        and target_piece.piece_type != chess.KING
+                    ):
+                        promotion = (
+                            chess.QUEEN
+                            if piece.piece_type == chess.PAWN and target_rank == 7
+                            else None
+                        )
+                        special_move = chess.Move(sq, target_sq, promotion=promotion)
+                        if special_move not in self.board.legal_moves:
+                            simulated = self.board.copy(stack=False)
+                            simulated.push(special_move)
+                            king_square = simulated.king(chess.WHITE)
+                            if king_square is not None and not simulated.is_attacked_by(
+                                chess.BLACK, king_square
+                            ):
+                                moves.append(special_move)
 
             if ability in ["sniper", "laser", "catapult", "archer"]:
                 for target_sq, target_p in self.board.piece_map().items():
@@ -314,13 +397,14 @@ class AsymmetricBoard:
         if isinstance(move, tuple) and move[0] == "RANGED_KILL":
             _, attacker_sq, target_sq = move
             victim = self.board.piece_at(target_sq)
+            if not victim or victim.piece_type == chess.KING:
+                return
             self.board.remove_piece_at(target_sq)
             if log_events and victim:
                 self.event_log.append(f"💥 Ranged strike from {chess.square_name(attacker_sq)} destroyed {victim.symbol().upper()} on {chess.square_name(target_sq)}!")
             self.board.turn = chess.BLACK
             self._tick_end_of_turn(log_events)
-            if log_events:
-                self._record_position()
+            self._record_position()
             return
 
         if isinstance(move, tuple) and move[0] == "SWAP":
@@ -336,8 +420,7 @@ class AsymmetricBoard:
                 if log_events:
                     self.event_log.append(f"🔀 The Queen swapped places with an ally on {chess.square_name(target_sq)}!")
                 self._tick_end_of_turn(log_events)
-                if log_events:
-                    self._record_position()
+                self._record_position()
             return
 
         if isinstance(move, tuple):
@@ -361,7 +444,19 @@ class AsymmetricBoard:
 
         attacker = self.board.piece_at(move.from_square)
         defender = self.board.piece_at(move.to_square)
+        if defender and defender.piece_type == chess.KING:
+            return
         is_white = (self.board.turn == chess.WHITE)
+        used_unique_move = False
+        if is_white and attacker:
+            ability = self.get_ability(attacker.piece_type)
+            if ability in UNIQUE_POWER_VECTORS:
+                df, dr = UNIQUE_POWER_VECTORS[ability]
+                used_unique_move = (
+                    chess.square_file(move.to_square) - chess.square_file(move.from_square) == df
+                    and chess.square_rank(move.to_square) - chess.square_rank(move.from_square) == dr
+                    and move not in self.board.legal_moves
+                )
 
         if not is_white and defender and defender.color == chess.WHITE:
             def_ability = self.get_ability(defender.piece_type)
@@ -371,8 +466,7 @@ class AsymmetricBoard:
                     self.event_log.append(f"🛡️ Templar armor shattered Stockfish's {attacker.symbol().upper()}!")
                 self.board.turn = chess.WHITE
                 self._tick_end_of_turn(log_events)
-                if log_events:
-                    self._record_position()
+                self._record_position()
                 return
             if def_ability == "titan":
                 self.board.remove_piece_at(move.from_square)
@@ -380,8 +474,7 @@ class AsymmetricBoard:
                     self.event_log.append(f"⚡ Godslayer Titan annihilated attacker {attacker.symbol().upper()}!")
                 self.board.turn = chess.WHITE
                 self._tick_end_of_turn(log_events)
-                if log_events:
-                    self._record_position()
+                self._record_position()
                 return
             if def_ability == "poison":
                 self.board.remove_piece_at(move.from_square)
@@ -389,14 +482,12 @@ class AsymmetricBoard:
                     self.event_log.append(f"☠️ Poisoned pawn killed Stockfish's {attacker.symbol().upper()}!")
                 self.board.turn = chess.WHITE
                 self._tick_end_of_turn(log_events)
-                if log_events:
-                    self._record_position()
+                self._record_position()
                 return
             if self._black_capture_is_blocked(move):
                 self.board.turn = chess.WHITE
                 self._tick_end_of_turn(log_events)
-                if log_events:
-                    self._record_position()
+                self._record_position()
                 return
 
         if not is_white and defender and defender.color == chess.WHITE:
@@ -408,6 +499,12 @@ class AsymmetricBoard:
         if is_white and attacker:
             ability = self.get_ability(attacker.piece_type)
             dest = move.to_square
+            if log_events and used_unique_move:
+                df, dr = UNIQUE_POWER_VECTORS[ability]
+                self.event_log.append(
+                    f"✨ {chess.piece_name(attacker.piece_type).title()} used its unique move "
+                    f"({df:+d} files, {dr:+d} ranks)!"
+                )
             self._resolve_white_ability(ability, move.from_square, dest, defender, log_events)
         elif not is_white and defender and defender.color == chess.WHITE:
             if defender.piece_type == chess.PAWN:
@@ -424,8 +521,7 @@ class AsymmetricBoard:
                     if log_events:
                         self.event_log.append(f"💣 Goblin pawn exploded on {chess.square_name(move.to_square)}!")
         self._tick_end_of_turn(log_events)
-        if log_events:
-            self._record_position()
+        self._record_position()
 
     def _resolve_white_ability(self, ability, start, dest, captured, log_events):
         if ability == "pike":
@@ -661,8 +757,10 @@ class AsymmetricBoard:
 PIECE_VALUES = {chess.PAWN: 100, chess.KNIGHT: 320, chess.BISHOP: 330, chess.ROOK: 500, chess.QUEEN: 900, chess.KING: 20000}
 
 def evaluate_board(custom_board):
-    if custom_board.board.is_checkmate():
+    if custom_board.game_over_reason() == "checkmate":
         return -99999 if custom_board.board.turn == chess.WHITE else 99999
+    if custom_board.is_game_over():
+        return 0
     score = 0
     for sq, piece in custom_board.board.piece_map().items():
         val = PIECE_VALUES[piece.piece_type]
@@ -705,7 +803,7 @@ def get_best_custom_move(custom_board, depth=2, for_white=True):
     return best_move, best_eval
 
 def minimax(custom_board, depth, alpha, beta, maximizing):
-    if depth == 0 or custom_board.board.is_game_over():
+    if depth == 0 or custom_board.is_game_over():
         return evaluate_board(custom_board)
     moves = custom_board.get_custom_legal_moves()
     if not moves:
@@ -786,13 +884,19 @@ def custom_piece_svg(piece, ability, square, cell_size):
     piece_fill = "#fff1ce" if white else "#29334b"
     ink = "#2d384e" if white else "#d7e5ff"
     accent = _piece_accent(ability)
-    ability_label = "AI" if not white else ability[:3].upper()
+    ability_label = "AI" if not white else ability.replace("unique_", "").replace("_", "").upper()
     opacity = "0.38" if ability == "stealth" else "1"
     file = chess.square_file(square)
     rank = chess.square_rank(square)
     x = file * cell_size
     y = (7 - rank) * cell_size
     title = html.escape(f"{'White' if white else 'Black'} {chess.piece_name(piece.piece_type)} — {ability}", quote=True)
+    if ability in POWER_DESCRIPTIONS:
+        title = html.escape(
+            f"{'White' if white else 'Black'} {chess.piece_name(piece.piece_type)} — "
+            f"{POWER_DESCRIPTIONS[ability]}",
+            quote=True,
+        )
     art = PIECE_ART[piece.piece_type].format(piece_fill=piece_fill, ink=ink, accent=accent)
     return (
         f'<g transform="translate({x} {y}) scale({cell_size / 100})" '
@@ -858,7 +962,10 @@ def render_custom_board(board, army, highlights=None, arrows=None, size=480):
 
 
 st.title("⚔️ Asymmetric Chess Army vs. Stockfish")
-st.markdown("Choose from **30 custom armies**. Every unit—including the King—has a faction power.")
+st.markdown(
+    "Choose from **30 custom armies**. Every piece has a globally unique special move. "
+    "Kings cannot be captured; games end only by checkmate, stalemate, or threefold repetition."
+)
 
 with st.sidebar:
     st.header("1. Stockfish Intelligence Mode")
@@ -875,29 +982,21 @@ with st.sidebar:
     army_id = army_options[selected_name]
     selected_army = ARMIES[army_id]
     st.info(f"**Abilities:** {selected_army['desc']}")
-    st.caption(
-        "Unit powers — " + " · ".join(
-            f"{label}: {selected_army[slot].replace('_', ' ').title()}"
-            for label, slot in (
-                ("Pawn", "p"), ("Knight", "n"), ("Bishop", "b"),
-                ("Rook", "r"), ("Queen", "q"), ("King", "k")
-            )
-        )
-    )
+    st.caption("Each piece has a different special move, unique across all 30 armies.")
     with st.expander("How these powers work"):
         for label, slot in (
             ("Pawn", "p"), ("Knight", "n"), ("Bishop", "b"),
             ("Rook", "r"), ("Queen", "q"), ("King", "k")
         ):
             ability = selected_army[slot]
-            st.markdown(f"**{label} — {ability.replace('_', ' ').title()}:** {POWER_DESCRIPTIONS[ability]}")
+            st.markdown(f"**{label} — Unique move:** {POWER_DESCRIPTIONS[ability]}")
 
     st.header("3. Deploy Units (1, 2, 3+)")
-    p_count = st.slider(f"Pawns ({selected_army['p']})", 0, 8, 8)
-    n_count = st.slider(f"Knights ({selected_army['n']})", 0, 4, 1)
-    b_count = st.slider(f"Bishops ({selected_army['b']})", 0, 4, 0)
-    r_count = st.slider(f"Rooks ({selected_army['r']})", 0, 4, 0)
-    q_count = st.slider(f"Queens ({selected_army['q']})", 0, 3, 0)
+    p_count = st.slider("Pawns", 0, 8, 8)
+    n_count = st.slider("Knights", 0, 4, 1)
+    b_count = st.slider("Bishops", 0, 4, 0)
+    r_count = st.slider("Rooks", 0, 4, 0)
+    q_count = st.slider("Queens", 0, 3, 0)
 
     roster = {
         chess.PAWN: p_count,
@@ -931,6 +1030,9 @@ if "game" not in st.session_state:
     st.session_state.review_index = 0
 
 game = st.session_state.game
+if getattr(game, "army", {}).get("name") in {army["name"] for army in ARMIES.values()}:
+    current_army = next(army for army in ARMIES.values() if army["name"] == game.army["name"])
+    game.army = current_army
 if not hasattr(game, "position_history"):
     legacy_game = game
     legacy_name = getattr(legacy_game, "army", {}).get("name")
@@ -942,8 +1044,19 @@ if not hasattr(game, "position_history"):
     game.captured_white = getattr(legacy_game, "captured_white", []).copy()
     game.event_log = getattr(legacy_game, "event_log", []).copy()
     game.position_history = []
+    game.position_counts = {}
     game._record_position()
     st.session_state.game = game
+
+if not hasattr(game, "position_counts"):
+    game.position_counts = {}
+    for snapshot in game.position_history:
+        key = snapshot.get("position_key")
+        if key is not None:
+            game.position_counts[key] = game.position_counts.get(key, 0) + 1
+    if not game.position_counts:
+        game.position_history = []
+        game._record_position()
 
 if "review_mode" not in st.session_state:
     st.session_state.review_mode = False
@@ -952,16 +1065,16 @@ if "review_index" not in st.session_state:
 
 history = game.position_history
 last_review_index = len(history) - 1
-if game.board.is_game_over() and not st.session_state.review_mode:
+if game.is_game_over() and not st.session_state.review_mode:
     st.session_state.review_index = last_review_index
 st.session_state.review_index = max(0, min(st.session_state.review_index, last_review_index))
-review_state = history[st.session_state.review_index] if game.board.is_game_over() and st.session_state.review_mode else None
+review_state = history[st.session_state.review_index] if game.is_game_over() and st.session_state.review_mode else None
 display_board = review_state["board"] if review_state else game.board
 display_plague_timers = review_state["plague_timers"] if review_state else game.plague_timers
 display_event_log = review_state["event_log"] if review_state else game.event_log
 
 def step_turn():
-    if game.board.is_game_over():
+    if game.is_game_over():
         return
 
     if game.board.turn == chess.WHITE:
@@ -969,13 +1082,10 @@ def step_turn():
         if move:
             game.push_custom_move(move, log_events=True)
 
-    if not game.board.is_game_over() and game.board.turn == chess.BLACK:
+    if not game.is_game_over() and game.board.turn == chess.BLACK:
         black_moves = game.get_custom_legal_moves()
         if not black_moves:
-            game.board.turn = chess.WHITE
-            game._tick_end_of_turn(log_events=True)
-            game.event_log.append("⏸️ Stockfish has no available move this turn.")
-            game._record_position()
+            return
         elif sf_knows_rules:
             sf_move, custom_ev = get_best_custom_move(game, depth=search_depth, for_white=False)
             if sf_move:
@@ -1061,20 +1171,21 @@ with col_side:
         m2.metric("Stockfish Eval", st.session_state.sf_eval)
 
     b1, b2 = st.columns(2)
-    if b1.button("▶️ Step 1 Turn", use_container_width=True, disabled=game.board.is_game_over()):
+    if b1.button("▶️ Step 1 Turn", use_container_width=True, disabled=game.is_game_over()):
         step_turn()
         st.rerun()
 
-    auto_play = b2.toggle("⏩ Auto-Play Match", value=False, disabled=game.board.is_game_over())
+    auto_play = b2.toggle("⏩ Auto-Play Match", value=False, disabled=game.is_game_over())
 
-    if game.board.is_game_over():
-        res = game.board.result()
+    if game.is_game_over():
+        res = game.result()
         if res == "1-0":
             st.success(f"🏆 VICTORY! {selected_army['name']} defeated Stockfish ({res})!")
         elif res == "0-1":
             st.error(f"💀 DEFEAT! Stockfish survived the siege ({res}).")
         else:
-            st.warning(f"🤝 DRAW ({res}).")
+            draw_reason = game.game_over_reason().title()
+            st.warning(f"🤝 DRAW — {draw_reason} ({res}).")
 
         st.subheader("🔎 Review Game")
         current_index = st.session_state.review_index if st.session_state.review_mode else last_review_index
@@ -1093,14 +1204,14 @@ with col_side:
             st.rerun()
         st.caption(f"Position {current_index + 1} of {len(history)} (including the starting position).")
 
-    st.subheader("📜 Special Ability Combat Log")
+    st.subheader("📜 Unique Move Log")
     if display_event_log:
         for event in reversed(display_event_log[-8:]):
             st.write(event)
     else:
         st.caption("No special abilities triggered yet.")
 
-if auto_play and not game.board.is_game_over():
+if auto_play and not game.is_game_over():
     time.sleep(move_delay)
     step_turn()
     st.rerun()
