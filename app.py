@@ -111,7 +111,43 @@ for army_id, army in ARMIES.items():
             raise ValueError(f"Army {army_id} has no implemented power for slot {slot!r}.")
 
 POWER_SLOT_ORDER = ("p", "n", "b", "r", "q", "k")
+PIECE_POWER_SLOTS = {
+    chess.PAWN: "p",
+    chess.KNIGHT: "n",
+    chess.BISHOP: "b",
+    chess.ROOK: "r",
+    chess.QUEEN: "q",
+    chess.KING: "k",
+}
 UNIQUE_POWER_VECTORS = {}
+UNIQUE_POWER_NAMES = {}
+UNIQUE_POWER_DESCRIPTIONS = {}
+ARMY_IDS_BY_NAME = {army["name"]: army_id for army_id, army in ARMIES.items()}
+POWER_NAME_PREFIXES = (
+    "Storm", "Shadow", "Frost", "Iron", "Ember",
+    "Moon", "Thunder", "Stone", "Void", "Dawn",
+    "Gale", "Dread", "Silver", "Wild", "Arcane",
+)
+POWER_NAME_SUFFIXES = (
+    "step", "vault", "lunge", "dash", "stride", "pounce",
+    "surge", "drift", "leap", "charge", "strike", "rush",
+)
+NUMBER_WORDS = ("zero", "one", "two", "three", "four", "five", "six", "seven")
+DUPLICATE_POWER_GROUPS = (
+    frozenset(("aura_kill", "assassin", "duelist", "trample")),
+    frozenset(("berserk", "hit_and_run")),
+    frozenset(("freeze", "stun")),
+    frozenset(("necromancer", "vampire")),
+)
+
+
+def _power_effect_key(ability):
+    return next(
+        (group for group in DUPLICATE_POWER_GROUPS if ability in group),
+        ability,
+    )
+
+
 move_vectors = [
     (df, dr)
     for distance in range(1, 8)
@@ -122,27 +158,50 @@ move_vectors = [
 if len(move_vectors) < len(ARMIES) * len(POWER_SLOT_ORDER):
     raise ValueError("Not enough unique move vectors for every army piece.")
 
-UNIQUE_POWER_NAMES = {}
-
+power_index = 0
+used_power_effects = set()
 for army_id, army in ARMIES.items():
-    army["desc"] = "Every piece has its own globally unique named custom move."
+    army["desc"] = "Faction powers are unique across the armies; every piece also has its own custom move."
     for slot in POWER_SLOT_ORDER:
-        power_id = f"unique_{army_id}_{slot}"
-        vector = move_vectors[len(UNIQUE_POWER_VECTORS)]
+        power_id = f"{army_id}_{slot}"
+        vector = move_vectors[power_index]
         UNIQUE_POWER_VECTORS[power_id] = vector
-        file_name = f"East{vector[0]}" if vector[0] > 0 else f"West{abs(vector[0])}" if vector[0] < 0 else "NoFile"
-        rank_name = f"North{vector[1]}" if vector[1] > 0 else f"South{abs(vector[1])}" if vector[1] < 0 else "NoRank"
-        UNIQUE_POWER_NAMES[power_id] = f"{file_name}{rank_name}"
-        army[slot] = power_id
-        POWER_DESCRIPTIONS[power_id] = (
-            f"Vaults by Δfile {vector[0]:+d}, Δrank {vector[1]:+d}, "
-            "jumping over intervening pieces and capturing non-king enemies."
+        prefix = POWER_NAME_PREFIXES[power_index // len(POWER_NAME_SUFFIXES)]
+        suffix = POWER_NAME_SUFFIXES[power_index % len(POWER_NAME_SUFFIXES)]
+        UNIQUE_POWER_NAMES[power_id] = f"{prefix}{suffix.title()}"
+        file_direction = (
+            f"{NUMBER_WORDS[abs(vector[0])]} "
+            f"{'file' if abs(vector[0]) == 1 else 'files'} "
+            f"to the {'right' if vector[0] > 0 else 'left'}"
+            if vector[0]
+            else "the same file"
         )
+        rank_direction = (
+            f"{NUMBER_WORDS[abs(vector[1])]} "
+            f"{'rank' if abs(vector[1]) == 1 else 'ranks'} "
+            f"{'forward' if vector[1] > 0 else 'backward'}"
+            if vector[1]
+            else "the same rank"
+        )
+        UNIQUE_POWER_DESCRIPTIONS[power_id] = (
+            f"Can leap {file_direction} and {rank_direction}, passing over intervening pieces; "
+            "lands on an empty square or captures a non-king enemy."
+        )
+        ability = army[slot]
+        effect_key = _power_effect_key(ability)
+        if effect_key in used_power_effects:
+            ability = f"custom_move_{army_id}_{slot}"
+            army[slot] = ability
+            POWER_DESCRIPTIONS[ability] = UNIQUE_POWER_DESCRIPTIONS[power_id]
+        else:
+            used_power_effects.add(effect_key)
+        power_index += 1
 
 class AsymmetricBoard:
     def __init__(self, army_config, roster_counts=None):
         self.board = chess.Board()
         self.army = army_config
+        self.army_id = ARMY_IDS_BY_NAME[army_config["name"]]
         self.plague_timers = {}
         self.stun_timers = {}
         self.captured_white = []
@@ -247,6 +306,9 @@ class AsymmetricBoard:
         }
         return mapping[piece_type]
 
+    def get_unique_power_id(self, piece_type):
+        return f"{self.army_id}_{PIECE_POWER_SLOTS[piece_type]}"
+
     def _is_protected(self, square):
         for neighbor in self._get_neighbors(square):
             piece = self.board.piece_at(neighbor)
@@ -295,9 +357,10 @@ class AsymmetricBoard:
             if piece.color != chess.WHITE:
                 continue
             ability = self.get_ability(piece.piece_type)
+            unique_power_id = self.get_unique_power_id(piece.piece_type)
 
-            if ability in UNIQUE_POWER_VECTORS:
-                df, dr = UNIQUE_POWER_VECTORS[ability]
+            if unique_power_id in UNIQUE_POWER_VECTORS:
+                df, dr = UNIQUE_POWER_VECTORS[unique_power_id]
                 target_file = chess.square_file(sq) + df
                 target_rank = chess.square_rank(sq) + dr
                 if 0 <= target_file <= 7 and 0 <= target_rank <= 7:
@@ -453,10 +516,12 @@ class AsymmetricBoard:
             return
         is_white = (self.board.turn == chess.WHITE)
         used_unique_move = False
+        unique_power_id = None
         if is_white and attacker:
             ability = self.get_ability(attacker.piece_type)
-            if ability in UNIQUE_POWER_VECTORS:
-                df, dr = UNIQUE_POWER_VECTORS[ability]
+            unique_power_id = self.get_unique_power_id(attacker.piece_type)
+            if unique_power_id in UNIQUE_POWER_VECTORS:
+                df, dr = UNIQUE_POWER_VECTORS[unique_power_id]
                 used_unique_move = (
                     chess.square_file(move.to_square) - chess.square_file(move.from_square) == df
                     and chess.square_rank(move.to_square) - chess.square_rank(move.from_square) == dr
@@ -505,12 +570,10 @@ class AsymmetricBoard:
             ability = self.get_ability(attacker.piece_type)
             dest = move.to_square
             if log_events and used_unique_move:
-                df, dr = UNIQUE_POWER_VECTORS[ability]
                 self.event_log.append(
                     f"✨ {chess.piece_name(attacker.piece_type).title()} "
-                    f"[{UNIQUE_POWER_NAMES[ability]}] "
-                    f"used its custom move "
-                    f"({df:+d} files, {dr:+d} ranks)!"
+                    f"[{UNIQUE_POWER_NAMES[unique_power_id]}] "
+                    f"used its custom move: {UNIQUE_POWER_DESCRIPTIONS[unique_power_id]}"
                 )
             self._resolve_white_ability(ability, move.from_square, dest, defender, log_events)
         elif not is_white and defender and defender.color == chess.WHITE:
@@ -886,27 +949,34 @@ def _piece_accent(ability):
     return "#62e6c6"
 
 
-def custom_piece_svg(piece, ability, square, cell_size):
+def custom_piece_svg(piece, ability, unique_power_id, square, cell_size):
     white = piece.color == chess.WHITE
     piece_fill = "#fff1ce" if white else "#29334b"
     ink = "#2d384e" if white else "#d7e5ff"
     accent = _piece_accent(ability)
     ability_label = "AI" if not white else (
-        "VLT" if ability in UNIQUE_POWER_VECTORS else ability.replace("_", "").upper()
+        "MOVE" if ability.startswith("custom_move_") else ability.replace("_", "").upper()[:3]
     )
     opacity = "0.38" if ability == "stealth" else "1"
     file = chess.square_file(square)
     rank = chess.square_rank(square)
     x = file * cell_size
     y = (7 - rank) * cell_size
-    title = html.escape(f"{'White' if white else 'Black'} {chess.piece_name(piece.piece_type)} — {ability}", quote=True)
-    if ability in POWER_DESCRIPTIONS:
-        title = html.escape(
-            f"{'White' if white else 'Black'} {chess.piece_name(piece.piece_type)} "
-            f"[{UNIQUE_POWER_NAMES[ability]}] — "
-            f"{POWER_DESCRIPTIONS[ability]}",
-            quote=True,
-        )
+    title = f"{'White' if white else 'Black'} {chess.piece_name(piece.piece_type)} — {ability}"
+    if white and unique_power_id:
+        if ability.startswith("custom_move_"):
+            title = (
+                f"{chess.piece_name(piece.piece_type).title()} "
+                f"[{UNIQUE_POWER_NAMES[unique_power_id]}]: "
+                f"{UNIQUE_POWER_DESCRIPTIONS[unique_power_id]}"
+            )
+        else:
+            title = (
+                f"{title} [{UNIQUE_POWER_NAMES[unique_power_id]}]: "
+                f"{POWER_DESCRIPTIONS[ability]} "
+                f"Custom move: {UNIQUE_POWER_DESCRIPTIONS[unique_power_id]}"
+            )
+    title = html.escape(title, quote=True)
     art = PIECE_ART[piece.piece_type].format(piece_fill=piece_fill, ink=ink, accent=accent)
     return (
         f'<g transform="translate({x} {y}) scale({cell_size / 100})" '
@@ -946,7 +1016,12 @@ def render_custom_board(board, army, highlights=None, arrows=None, size=480):
             chess.KING: "k",
         }.get(piece.piece_type)
         ability = army[ability_slot] if piece.color == chess.WHITE and ability_slot else "AI"
-        parts.append(custom_piece_svg(piece, ability, square, cell_size))
+        unique_power_id = (
+            f"{ARMY_IDS_BY_NAME[army['name']]}_{ability_slot}"
+            if piece.color == chess.WHITE and ability_slot
+            else None
+        )
+        parts.append(custom_piece_svg(piece, ability, unique_power_id, square, cell_size))
 
     for start, end, color in arrows or []:
         start_x = (chess.square_file(start) + 0.5) * cell_size
@@ -973,7 +1048,7 @@ def render_custom_board(board, army, highlights=None, arrows=None, size=480):
 
 st.title("⚔️ Asymmetric Chess Army vs. Stockfish")
 st.markdown(
-    "Choose from **30 custom armies**. Every piece has a globally unique named custom move. "
+    "Choose from **30 custom armies**. Faction powers do not repeat across armies, and every piece gets a globally unique custom move. "
     "Kings cannot be captured; games end only by checkmate, stalemate, or threefold repetition."
 )
 
@@ -992,16 +1067,27 @@ with st.sidebar:
     army_id = army_options[selected_name]
     selected_army = ARMIES[army_id]
     st.info(f"**Abilities:** {selected_army['desc']}")
-    st.caption("Each piece has a distinct, named move; the bracketed name identifies its movement.")
+    st.caption("Faction powers are not reused; every piece also gets its own globally unique custom move.")
     with st.expander("How these powers work"):
         for label, slot in (
             ("Pawn", "p"), ("Knight", "n"), ("Bishop", "b"),
             ("Rook", "r"), ("Queen", "q"), ("King", "k")
         ):
             ability = selected_army[slot]
-            st.markdown(
-                f"**{label} [{UNIQUE_POWER_NAMES[ability]}]:** {POWER_DESCRIPTIONS[ability]}"
-            )
+            unique_power_id = f"{army_id}_{slot}"
+            if ability.startswith("custom_move_"):
+                power_line = (
+                    f"**{label} [{UNIQUE_POWER_NAMES[unique_power_id]}]:** "
+                    f"{UNIQUE_POWER_DESCRIPTIONS[unique_power_id]}"
+                )
+            else:
+                power_line = (
+                    f"**{label} — {ability.replace('_', ' ').title()} "
+                    f"[{UNIQUE_POWER_NAMES[unique_power_id]}]:** "
+                    f"{POWER_DESCRIPTIONS[ability]} "
+                    f"**Custom move:** {UNIQUE_POWER_DESCRIPTIONS[unique_power_id]}"
+                )
+            st.markdown(power_line)
 
     st.header("3. Deploy Units (1, 2, 3+)")
     p_count = st.slider("Pawns", 0, 8, 8)
@@ -1059,6 +1145,9 @@ if not hasattr(game, "position_history"):
     game.position_counts = {}
     game._record_position()
     st.session_state.game = game
+
+if not hasattr(game, "army_id"):
+    game.army_id = ARMY_IDS_BY_NAME[game.army["name"]]
 
 if not hasattr(game, "position_counts"):
     game.position_counts = {}
