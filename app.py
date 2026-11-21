@@ -572,7 +572,7 @@ class AsymmetricBoard:
             if log_events and used_unique_move:
                 self.event_log.append(
                     f"✨ {chess.piece_name(attacker.piece_type).title()} "
-                    f"[{UNIQUE_POWER_NAMES[unique_power_id]}] "
+                    f"({UNIQUE_POWER_NAMES[unique_power_id]}) "
                     f"used its custom move: {UNIQUE_POWER_DESCRIPTIONS[unique_power_id]}"
                 )
             self._resolve_white_ability(ability, move.from_square, dest, defender, log_events)
@@ -967,12 +967,13 @@ def custom_piece_svg(piece, ability, unique_power_id, square, cell_size):
         if ability.startswith("custom_move_"):
             title = (
                 f"{chess.piece_name(piece.piece_type).title()} "
-                f"[{UNIQUE_POWER_NAMES[unique_power_id]}]: "
+                f"({UNIQUE_POWER_NAMES[unique_power_id]}): "
                 f"{UNIQUE_POWER_DESCRIPTIONS[unique_power_id]}"
             )
         else:
             title = (
-                f"{title} [{UNIQUE_POWER_NAMES[unique_power_id]}]: "
+                f"{chess.piece_name(piece.piece_type).title()} "
+                f"({UNIQUE_POWER_NAMES[unique_power_id]}): "
                 f"{POWER_DESCRIPTIONS[ability]} "
                 f"Custom move: {UNIQUE_POWER_DESCRIPTIONS[unique_power_id]}"
             )
@@ -1077,15 +1078,15 @@ with st.sidebar:
             unique_power_id = f"{army_id}_{slot}"
             if ability.startswith("custom_move_"):
                 power_line = (
-                    f"**{label} [{UNIQUE_POWER_NAMES[unique_power_id]}]:** "
+                    f"**{label} ({UNIQUE_POWER_NAMES[unique_power_id]}):** "
                     f"{UNIQUE_POWER_DESCRIPTIONS[unique_power_id]}"
                 )
             else:
                 power_line = (
-                    f"**{label} — {ability.replace('_', ' ').title()} "
-                    f"[{UNIQUE_POWER_NAMES[unique_power_id]}]:** "
+                    f"**{label} ({UNIQUE_POWER_NAMES[unique_power_id]}):** "
+                    f"Faction power — {ability.replace('_', ' ').title()}: "
                     f"{POWER_DESCRIPTIONS[ability]} "
-                    f"**Custom move:** {UNIQUE_POWER_DESCRIPTIONS[unique_power_id]}"
+                    f"Custom move: {UNIQUE_POWER_DESCRIPTIONS[unique_power_id]}"
                 )
             st.markdown(power_line)
 
